@@ -1,22 +1,17 @@
 """
-Bronze layer: Feature extraction pipeline using Spark and PyTorch.
-Follows PEP 8 standards with strict type hinting and import isolation.
+Bronze Layer Logic.
+
+Distributed feature extraction using PyTorch SDPA and Spark Pandas UDFs.
 """
 from __future__ import annotations
-from typing import Iterator, List, Tuple, Any
 
+from typing import Iterator, List, Tuple, Any, Dict
 import pandas as pd
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, pandas_udf
 from pyspark.sql.types import StructType, StructField, StringType, ArrayType, FloatType
 
-
-class BronzeConfig:
-    def __init__(self, backbone: str, img_col: str, out_path: str, batch_size: int = 32):
-        self.backbone = backbone
-        self.img_col = img_col
-        self.out_path = out_path
-        self.batch_size = batch_size
+from src.configs import ExperimentConfig
 
 
 def get_schema() -> StructType:
@@ -29,13 +24,28 @@ def get_schema() -> StructType:
 
 
 def _load_model(model_name: str) -> Tuple[Any, Any, str]:
-    """Initializes the model inside the worker process."""
+    """Initializes model on executor with FP16 and SDPA."""
     import torch
+    import warnings
     from transformers import AutoImageProcessor, AutoModel
+    from transformers import logging as hf_logging
+
+    hf_logging.set_verbosity_error()
+    warnings.simplefilter("ignore")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    processor = AutoImageProcessor.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name).to(device).eval()
+    dtype = torch.float16 if device == "cuda" else torch.float32
+
+    try:
+        processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
+    except Exception:
+        processor = AutoImageProcessor.from_pretrained(model_name, use_fast=False)
+
+    model = AutoModel.from_pretrained(
+        model_name,
+        torch_dtype=dtype,
+        attn_implementation="sdpa"
+    ).to(device).eval()
 
     if device == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -45,16 +55,17 @@ def _load_model(model_name: str) -> Tuple[Any, Any, str]:
 
 def _process_batch(
     paths: List[str], processor: Any, model: Any, device: str
-) -> List[dict]:
-    """Performs inference on a single batch of images."""
+) -> List[Dict[str, Any]]:
+    """Runs inference on a batch of images."""
     import torch
+    from torch.nn.attention import sdpa_kernel, SDPBackend
     from PIL import Image
 
-    valid_imgs, valid_paths = [], []
+    valid_imgs: List[Image.Image] = []
+    valid_paths: List[str] = []
 
     for p in paths:
         try:
-            # Convert to RGB to handle PNG/Grayscale inconsistencies
             valid_imgs.append(Image.open(p).convert("RGB"))
             valid_paths.append(str(p))
         except Exception:
@@ -64,13 +75,23 @@ def _process_batch(
         return []
 
     try:
-        with torch.no_grad():
-            inputs = processor(images=valid_imgs, return_tensors="pt").to(device)
+        backends = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+        
+        with torch.no_grad(), sdpa_kernel(backends):
+            inputs = processor(images=valid_imgs, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            if device == "cuda":
+                # Shape: [batch_size, 3, H, W] -> Float16
+                inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
+
             outputs = model(**inputs)
 
-            # Move tensors to CPU immediately to free VRAM
-            cls = outputs.last_hidden_state[:, 0, :].cpu().numpy()
-            patches = outputs.last_hidden_state[:, 1:, :].cpu().numpy()
+            # Last hidden: [batch_size, seq_len, hidden_dim]
+            last_hidden = outputs.last_hidden_state
+            
+            cls = last_hidden[:, 0, :].float().cpu().numpy()
+            patches = last_hidden[:, 1:, :].float().cpu().numpy()
 
         return [
             {
@@ -84,42 +105,28 @@ def _process_batch(
 
     except RuntimeError as e:
         if "out of memory" in str(e):
-            print(f"ERROR: CUDA OOM. Batch size {len(paths)} is too large.")
+            print(f"ERROR: VRAM OOM (Batch Size: {len(paths)})")
         return []
 
 
-def run_bronze(spark: SparkSession, df: DataFrame, cfg: BronzeConfig) -> None:
-    """Executes the distributed Bronze Layer pipeline."""
-    
-    # Broadcast large/static variables
-    bc_model_name = spark.sparkContext.broadcast(cfg.backbone)
+def run_bronze(spark: SparkSession, df: DataFrame, cfg: ExperimentConfig) -> None:
+    """Executes the Bronze Layer pipeline."""
+    bc_model = spark.sparkContext.broadcast(cfg.backbone_name)
     batch_size = cfg.batch_size
 
     @pandas_udf(get_schema())
     def extract_udf(iterator: Iterator[pd.Series]) -> Iterator[pd.DataFrame]:
-        # Import Isolation: libraries loaded only on workers
-        processor, model, device = _load_model(bc_model_name.value)
+        processor, model, device = _load_model(bc_model.value)
 
         for batch_paths in iterator:
             paths = batch_paths.tolist()
-            
-            # Chunk processing to respect memory limits
             for i in range(0, len(paths), batch_size):
                 chunk = paths[i : i + batch_size]
-                results = _process_batch(chunk, processor, model, device)
-                yield pd.DataFrame.from_records(results)
+                yield pd.DataFrame.from_records(
+                    _process_batch(chunk, processor, model, device)
+                )
 
-    # Execution Plan
-    df_processed = (
-        df.repartition(8)
-        .select(col(cfg.img_col).alias("path"))
-        .select(extract_udf(col("path")).alias("data"))
-        .select(
-            col("data.image_path"),
-            col("data.cls"),
-            col("data.patches"),
-            col("data.device")
-        )
-    )
-
-    df_processed.write.mode("overwrite").parquet(cfg.out_path)
+    df.repartition(4).select(col("image_path").alias("path")) \
+      .select(extract_udf(col("path")).alias("data")) \
+      .select("data.*") \
+      .write.mode("overwrite").parquet(cfg.output_path)

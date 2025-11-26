@@ -1,0 +1,18 @@
+spark:
+  app_name: "KnowledgeInjection_Bronze"
+  master: "local[4]"
+  driver_mem: "8g"
+  executor_mem: "8g"
+  off_heap_enabled: "true"
+  off_heap_size: "4g"
+  network_timeout: "800s"
+  heartbeat_interval: "200s"
+  max_result_size: "6g"
+  arrow_enabled: "true"
+
+experiment:
+  backbone_name: "facebook/dinov2-base"
+  batch_size: 64
+  input_path: "data/raw/source"
+  output_path: "data/processed/bronze_parquet"
+  log_file: "logging/experiments_log.csv"

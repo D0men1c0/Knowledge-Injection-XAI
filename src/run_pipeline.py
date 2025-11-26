@@ -1,113 +1,104 @@
+"""
+Pipeline Entry Point.
+
+Loads YAML config, sets up environment, and executes the Bronze Layer.
+"""
 import os
 import sys
 import time
-import csv
-import threading
-import psutil
-from datetime import datetime
 from pathlib import Path
+
 from pyspark.sql import SparkSession
-from src.pipeline.bronze_layer import run_bronze, BronzeConfig
 
-# --- CONFIGURATION ---
-SPARK_DRIVER_MEM = "4g"
-BATCH_SIZE = 32
-LOG_FILE = "experiments_log.csv"
+from src.configs import load_config, ExperimentConfig
+from src.pipeline.bronze_layer import run_bronze
+from src.utils.telemetry import ResourceMonitor, ExperimentLogger, logger
 
-class ResourceMonitor(threading.Thread):
-    """Background thread to track system resource usage."""
-    def __init__(self, interval=1.0):
-        super().__init__()
-        self.interval = interval
-        self.stop_event = threading.Event()
-        self.cpu_log = []
-        self.ram_log = []
 
-    def run(self):
-        while not self.stop_event.is_set():
-            self.cpu_log.append(psutil.cpu_percent())
-            self.ram_log.append(psutil.virtual_memory().percent)
-            time.sleep(self.interval)
+def setup_windows_hadoop() -> None:
+    """Sets up Hadoop environment for Windows."""
+    hadoop_home = Path("C:/hadoop")
+    if hadoop_home.exists() and (hadoop_home / "bin/hadoop.dll").exists():
+        os.environ['HADOOP_HOME'] = str(hadoop_home)
+        sys.path.append(str(hadoop_home / "bin"))
+        os.environ['PATH'] += os.pathsep + str(hadoop_home / "bin")
+    else:
+        logger.warning("Hadoop Utils not found. Parquet write may fail.")
 
-    def stop(self):
-        self.stop_event.set()
 
-    def get_stats(self):
-        if not self.cpu_log: return 0.0, 0.0
-        avg_cpu = sum(self.cpu_log) / len(self.cpu_log)
-        max_ram = max(self.ram_log)
-        return avg_cpu, max_ram
-
-def log_experiment(duration, num_imgs, batch, device, cpu_avg, ram_max):
-    file_exists = os.path.isfile(LOG_FILE)
-    with open(LOG_FILE, 'a', newline='') as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["Timestamp", "Images", "Batch", "Sec", "Img/Sec", "Device", "Avg_CPU%", "Max_RAM%"])
+def build_spark_session(config: ExperimentConfig) -> SparkSession:
+    """Builds Spark Session from config object."""
+    builder = SparkSession.builder.appName(config.spark.app_name).master(config.spark.master)
+    
+    for key, value in config.spark.to_dict().items():
+        builder = builder.config(key, value)
         
-        img_per_sec = num_imgs / duration if duration > 0 else 0
-        writer.writerow([
-            datetime.now().strftime("%H:%M:%S"),
-            num_imgs, batch, f"{duration:.1f}", f"{img_per_sec:.1f}",
-            device, f"{cpu_avg:.1f}", f"{ram_max:.1f}"
-        ])
-    print(f"\n[INFO] Metrics saved: {duration:.1f}s | RAM Peak: {ram_max}% | CPU Avg: {cpu_avg}%")
+    spark = builder.getOrCreate()
+    spark.sparkContext.setLogLevel("ERROR")
+    return spark
 
-def main():
+
+def main() -> None:
+    # 1. Setup
     os.environ['PYSPARK_PYTHON'] = sys.executable
     os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
+    setup_windows_hadoop()
 
-    print(f"[INIT] Starting Spark with {SPARK_DRIVER_MEM} JVM Heap limit...")
-    
-    spark = SparkSession.builder \
-        .appName("BronzeLayer_Optimized") \
-        .master("local[*]") \
-        .config("spark.driver.memory", SPARK_DRIVER_MEM) \
-        .config("spark.executor.memory", "4g") \
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
-        .config("spark.sql.execution.arrow.maxRecordsPerBatch", "1000") \
-        .config("spark.driver.maxResultSize", "2g") \
-        .getOrCreate()
-    
-    spark.sparkContext.setLogLevel("ERROR")
+    # 2. Config
+    try:
+        cfg = load_config("configuration/config.yaml")
+        logger.info(f"Loaded config. Batch: {cfg.batch_size}, Master: {cfg.spark.master}")
+    except Exception as e:
+        logger.error(f"Failed to load config.yaml: {e}")
+        return
 
-    # 1. Load Data
-    input_dir = Path("data/raw/source")
-    paths = [str(p.absolute()) for p in input_dir.rglob("*.jpg")]
+    # 3. Spark
+    spark = build_spark_session(cfg)
+    
+    # 4. Data
+    paths = [str(p.absolute()) for p in cfg.input_path.rglob("*.jpg")]
     if not paths:
-        print("No images found."); return
+        logger.error(f"No images found in {cfg.input_path}")
+        spark.stop()
+        return
 
     df_input = spark.createDataFrame([(p,) for p in paths], schema=["image_path"])
-    config = BronzeConfig("facebook/dinov2-base", "image_path", "data/processed/bronze_parquet", BATCH_SIZE)
+    logger.info(f"Pipeline Input: {len(paths)} images.")
 
-    # 2. Start Monitor
-    monitor = ResourceMonitor()
+    # 5. Execution
+    monitor = ResourceMonitor(interval=0.5)
     monitor.start()
+    start_time = time.time()
 
-    # 3. Run Pipeline
-    print(f"[RUN] Processing {len(paths)} images on GPU (Batch: {BATCH_SIZE})...")
-    start = time.time()
-    
     try:
-        run_bronze(spark, df_input, config)
-    except Exception as e:
-        print(f"[ERROR] Pipeline failed: {e}")
-    finally:
+        run_bronze(spark, df_input, cfg)
+        
+        duration = time.time() - start_time
         monitor.stop()
         monitor.join()
 
-    duration = time.time() - start
-    
-    # 4. Check & Log
-    try:
-        df_res = spark.read.parquet(config.output_path)
-        device = df_res.select("device").first()["device"]
-        cpu, ram = monitor.get_stats()
-        log_experiment(duration, len(paths), BATCH_SIZE, device, cpu, ram)
-    except Exception as e:
-        print(f"[WARN] Could not verify output: {e}")
+        # 6. Logging
+        stats = monitor.get_stats()
+        
+        df_result = spark.read.parquet(cfg.output_path)
+        device_row = df_result.select("device").limit(1).collect()
+        device_used = device_row[0]["device"] if device_row else "Unknown"
 
-    spark.stop()
+        exp_logger = ExperimentLogger(cfg.log_file)
+        exp_logger.log(
+            duration, len(paths), cfg.batch_size, device_used,
+            stats, cfg.spark.to_dict()
+        )
+
+        logger.info("--- Top 5 Records ---")
+        df_result.select("image_path", "device").show(5, truncate=False)
+
+    except Exception as e:
+        logger.critical(f"Pipeline crashed: {e}", exc_info=True)
+        monitor.stop()
+    finally:
+        spark.stop()
+
 
 if __name__ == "__main__":
     main()
