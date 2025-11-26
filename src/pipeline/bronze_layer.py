@@ -111,8 +111,8 @@ def _process_batch(
 
 def run_bronze(spark: SparkSession, df: DataFrame, cfg: ExperimentConfig) -> None:
     """Executes the Bronze Layer pipeline."""
-    bc_model = spark.sparkContext.broadcast(cfg.backbone_name)
-    batch_size = cfg.batch_size
+    bc_model = spark.sparkContext.broadcast(cfg.model.backbone_name)
+    batch_size = cfg.model.batch_size
 
     @pandas_udf(get_schema())
     def extract_udf(iterator: Iterator[pd.Series]) -> Iterator[pd.DataFrame]:
@@ -129,4 +129,4 @@ def run_bronze(spark: SparkSession, df: DataFrame, cfg: ExperimentConfig) -> Non
     df.repartition(4).select(col("image_path").alias("path")) \
       .select(extract_udf(col("path")).alias("data")) \
       .select("data.*") \
-      .write.mode("overwrite").parquet(cfg.output_path)
+      .write.mode("overwrite").parquet(cfg.paths.bronze)

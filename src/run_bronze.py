@@ -1,7 +1,7 @@
 """
-Pipeline Entry Point.
+Pipeline Entry Point (Bronze Layer).
 
-Loads YAML config, sets up environment, and executes the Bronze Layer.
+Loads YAML config, sets up environment, and executes the Bronze Layer extraction.
 """
 import os
 import sys
@@ -39,26 +39,28 @@ def build_spark_session(config: ExperimentConfig) -> SparkSession:
 
 
 def main() -> None:
-    # 1. Setup
+    # 1. Environment Setup
     os.environ['PYSPARK_PYTHON'] = sys.executable
     os.environ['PYSPARK_DRIVER_PYTHON'] = sys.executable
     setup_windows_hadoop()
 
-    # 2. Config
+    # 2. Config Loading
     try:
         cfg = load_config("configuration/config.yaml")
-        logger.info(f"Loaded config. Batch: {cfg.batch_size}, Master: {cfg.spark.master}")
+        logger.info(f"Loaded config. Batch: {cfg.model.batch_size}, Master: {cfg.spark.master}")
     except Exception as e:
         logger.error(f"Failed to load config.yaml: {e}")
         return
 
-    # 3. Spark
+    # 3. Spark Init
     spark = build_spark_session(cfg)
     
-    # 4. Data
-    paths = [str(p.absolute()) for p in cfg.input_path.rglob("*.jpg")]
+    # 4. Data Preparation
+    # Recursive search for images in the configured input path
+    paths = [str(p.absolute()) for p in cfg.paths.input.rglob("*.jpg")]
+    
     if not paths:
-        logger.error(f"No images found in {cfg.input_path}")
+        logger.error(f"No images found in {cfg.paths.input}")
         spark.stop()
         return
 
@@ -71,26 +73,27 @@ def main() -> None:
     start_time = time.time()
 
     try:
+        # Pass the entire config object to run_bronze
         run_bronze(spark, df_input, cfg)
         
         duration = time.time() - start_time
         monitor.stop()
         monitor.join()
 
-        # 6. Logging
+        # 6. Logging & Verification
         stats = monitor.get_stats()
         
-        df_result = spark.read.parquet(cfg.output_path)
+        df_result = spark.read.parquet(cfg.paths.bronze)
         device_row = df_result.select("device").limit(1).collect()
         device_used = device_row[0]["device"] if device_row else "Unknown"
 
-        exp_logger = ExperimentLogger(cfg.log_file)
+        exp_logger = ExperimentLogger(cfg.paths.logs)
         exp_logger.log(
-            duration, len(paths), cfg.batch_size, device_used,
+            duration, len(paths), cfg.model.batch_size, device_used,
             stats, cfg.spark.to_dict()
         )
 
-        logger.info("--- Top 5 Records ---")
+        logger.info("--- Top 5 Bronze Records ---")
         df_result.select("image_path", "device").show(5, truncate=False)
 
     except Exception as e:
