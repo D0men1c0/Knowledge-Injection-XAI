@@ -42,6 +42,8 @@ def download_oxford_iiit_pet() -> None:
         label = row["label"]
         cls_dir = out_dir / str(label)
         cls_dir.mkdir(parents=True, exist_ok=True)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
         image.save(cls_dir / f"{idx}.jpg")
 
 
