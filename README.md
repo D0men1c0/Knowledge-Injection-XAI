@@ -13,14 +13,43 @@ You don't need to install Python, CUDA, or Spark manually. Everything runs insid
 * **WSL 2 Integration** enabled in Docker Settings.
 * **NVIDIA Drivers** updated on Windows.
 
-### 1. Build & Start the Environment
-Open your terminal in the project root and run:
+---
+
+## 1. Navigate to Project Folder
+
+⚠️ **Important:** For the bind mount to work correctly, you **must run Docker commands from the folder that contains the `docker-compose.yml` file**.  
+
+On Windows/WSL2, the correct folder is:
 
 ```bash
-# Build and start the container in background
-docker-compose up -d --build
+cd /mnt/c/PythonProjects/Knowledge-Injection-XAI
 ```
-## 2. Enter the Container
+
+Check that the compose file exists:
+
+```bash
+ls docker-compose.yml
+```
+
+---
+
+## 2. Build & Start the Environment
+
+From the project root, run:
+
+```bash
+docker compose up -d --build
+```
+
+> If there is a conflict with the container name, first remove old containers:
+```bash
+docker rm -f xai_container
+docker compose down -v --remove-orphans
+```
+
+---
+
+## 3. Enter the Container
 
 To run scripts, you must be inside the Linux shell:
 
@@ -36,9 +65,31 @@ python3 -c "import torch; print(f'GPU: {torch.cuda.get_device_name(0)}' if torch
 
 ---
 
+## Bind Mount Behavior
+
+All files created in `/app` inside the container are **saved directly in your Windows folder**:
+
+/app ↔ C:\PythonProjects\Knowledge-Injection-XAI
+
+- No duplication occurs.  
+- Modifying files in the container instantly updates the Windows folder.  
+- Modifying files on Windows instantly updates `/app` in the container.  
+- The Docker image itself **does not store these files**, so your data is safe outside Docker.
+
+Test:
+
+```bash
+echo "BIND OK" > /app/test_bind.txt
+```
+
+Check on Windows:  
+`C:\PythonProjects\Knowledge-Injection-XAI\test_bind.txt` should appear.
+
+---
+
 ## Pipeline Execution
 
-Run these commands inside the container. The pipeline consists of **4 sequential layers**.
+Run these commands **inside the container**. The pipeline has 4 sequential layers.
 
 ---
 
@@ -57,7 +108,7 @@ python3 -m src.run_bronze
 
 ### 2. Platinum Layer (LoRA Training)
 
-Trains the Adapter Zoo (Rank 4, 16, 32) on your dataset. This creates the models used for evaluation.
+Trains the Adapter Zoo (Rank 4, 16, 32) on your dataset.
 
 **Input:** Raw images  
 **Output:** Trained weights in `artifacts/adapters/`
@@ -70,7 +121,7 @@ python3 -m src.run_training
 
 ### 3. Silver Layer (Distributed XAI)
 
-The core analysis engine. Loads the trained LoRA adapters, performs inference on the Bronze data, and calculates XAI metrics (Entropy, Deletion Score, etc.).
+Loads trained LoRA adapters, performs inference on Bronze data, calculates XAI metrics (Entropy, Deletion Score, etc.)
 
 **Input:** Bronze Parquet + Trained Adapters  
 **Output:** Analytical table in `data/processed/silver_parquet`
@@ -83,7 +134,7 @@ python3 -m src.run_silver
 
 ### 4. Gold Layer (Meta-Dataset)
 
-Aggregates the Silver results to produce the final Meta-Dataset (Model-level statistics).
+Aggregates Silver results to produce final Meta-Dataset (model-level statistics).
 
 **Input:** Silver Parquet  
 **Output:** Final CSV/Parquet in `data/processed/gold_parquet`
@@ -91,16 +142,6 @@ Aggregates the Silver results to produce the final Meta-Dataset (Model-level sta
 ```bash
 python3 -m src.run_gold
 ```
-
----
-
-## Data Management
-
-**Where are my files?**  
-The container uses a **Bind Mount**.
-
-Any file generated inside `/app/data` in Docker appears instantly in your Windows `data/` folder.  
-You do **not** need to copy files manually.
 
 ---
 
@@ -116,14 +157,18 @@ Edit `configuration/config.yaml` to change:
 
 ## Troubleshooting
 
-- **GPU Memory Error:** Reduce `batch_size` in `config.yaml` (e.g., from `64` to `16`)
+- **GPU Memory Error:** Reduce `batch_size` in `config.yaml` (e.g., 64 → 16)
 - **Changes not applying:**  
   - Python code → instant  
   - Requirements / Dockerfile →  
     ```bash
-    docker-compose up -d --build
+    docker compose up -d --build
     ```
 - **Stop everything:**
-  ```bash
-  docker-compose down
-  ```
+    ```bash
+    docker compose down
+    ```
+- **Bind mount not working:** Make sure:
+  1. You are in the correct folder: `/mnt/c/PythonProjects/Knowledge-Injection-XAI`
+  2. The container was recreated after modifying compose: `docker compose up -d --build`
+  3. You are using `/mnt/c/...` in the compose file, not `/home/...` inside WSL
