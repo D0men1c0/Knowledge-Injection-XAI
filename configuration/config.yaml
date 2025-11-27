@@ -23,10 +23,10 @@ model:
   patch_size: 14
 
 adapters:
-  ranks: [4, 8, 32]
+  ranks: [4]
   alpha: 16
   dropout: 0.1
   target_modules: ["query", "value"]
 
 xai:
-  perturbation_steps: 10
+  perturbation_steps: 5

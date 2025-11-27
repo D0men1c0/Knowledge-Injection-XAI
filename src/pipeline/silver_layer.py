@@ -5,11 +5,10 @@ Executes the core logic of the framework:
 1. Joins Bronze data with Adapter Zoo (LoRA configurations).
 2. Distributed Inference: Applies LoRA adapters dynamically.
 3. Computes XAI Metrics: Entropy, Deletion, Insertion, Sparsity.
-
-Reference: Proposal 2.1 (Silver Layer), 3.2 (Entropy), 3.3 (Deletion).
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterator, List, Dict, Any, Tuple
 import pandas as pd
 from pyspark.sql import SparkSession, DataFrame
@@ -29,27 +28,21 @@ def get_silver_schema() -> StructType:
         StructField("sparsity", FloatType(), True),
         StructField("deletion_score", FloatType(), True),
         StructField("insertion_score", FloatType(), True),
-        StructField("predicted_class", FloatType(), True),
+        StructField("predicted_class", StringType(), True),
+        StructField("true_label", StringType(), True),
         StructField("device", StringType(), True),
     ])
 
 
-def _load_base_model_and_processor(model_name: str) -> Tuple[Any, Any, str]:
+def _load_base_model_and_processor(model_name: str, num_labels: int) -> Tuple[Any, Any, str]:
     """
-    Initializes the base DINOv2 model and processor on the worker.
-
-    Args:
-        model_name: HuggingFace model identifier.
-
-    Returns:
-        Tuple[Processor, Model, Device string]
+    Initializes the base DINOv2 model with the CORRECT classification head size.
     """
     import torch
     import warnings
     from transformers import AutoImageProcessor, AutoModelForImageClassification
     from transformers import logging as hf_logging
 
-    # Suppress library noise
     hf_logging.set_verbosity_error()
     warnings.simplefilter("ignore")
 
@@ -57,11 +50,12 @@ def _load_base_model_and_processor(model_name: str) -> Tuple[Any, Any, str]:
     
     processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
     
-    # Load model with attention output enabled for XAI
     model = AutoModelForImageClassification.from_pretrained(
         model_name,
         output_attentions=True,
-        return_dict=True
+        return_dict=True,
+        num_labels=num_labels,
+        ignore_mismatched_sizes=True 
     ).to(device).eval()
 
     return processor, model, device
@@ -73,16 +67,17 @@ def _process_partition(
 ) -> Iterator[pd.DataFrame]:
     """
     Scalar Iterator Logic.
-    Loads model ONCE per partition, then iterates over batches.
     """
     import torch
     from PIL import Image
 
-    # 1. Initialize Resources (Once per Executor/Partition)
-    processor, base_model, device = _load_base_model_and_processor(backbone_name)
+    # --- HARDCODED CONFIG FOR DATASET ---
+    NUM_CLASSES = 37 
+    
+    # 1. Initialize Resources
+    processor, base_model, device = _load_base_model_and_processor(backbone_name, NUM_CLASSES)
     evaluator = XAIEvaluator()
 
-    # Cache for LoRA adapters to avoid re-initialization overhead
     active_rank = -1
     peft_model = None
 
@@ -95,28 +90,32 @@ def _process_partition(
 
             # 2. Dynamic Adapter Switching
             if adapter_rank != active_rank:
-                # Injects LoRA layers dynamically
                 peft_model = LoRAFactory.inject_adapter(base_model, adapter_rank)
                 peft_model.eval()
                 active_rank = adapter_rank
 
             try:
-                # 3. Data Loading (Raw Image required for Deletion Score)
+                # 3. Data Loading & Label Extraction
                 image = Image.open(image_path).convert("RGB")
                 
+                # Extract label from folder name and ensure it's within range
+                true_label_str = Path(image_path).parent.name
+                try:
+                    true_label_idx = int(true_label_str)
+                    # Clamp label if dataset is messy/unmapped
+                    if true_label_idx >= NUM_CLASSES:
+                        true_label_idx = 0 
+                except ValueError:
+                    true_label_idx = 0
+
                 inputs = processor(images=image, return_tensors="pt")
-                # Tensor Shape: [1, 3, height, width]
                 pixel_values = inputs["pixel_values"].to(device)
 
-                # 4. Inference (Forward Pass)
+                # 4. Inference
                 with torch.no_grad():
                     outputs = peft_model(pixel_values)
-                    
-                    # Tensor Shape: [1, num_classes]
                     logits = outputs.logits
-                    pred_class = torch.argmax(logits, dim=-1).item()
-                    
-                    # Tuple of Attentions: [num_layers, 1, num_heads, seq_len, seq_len]
+                    pred_idx = torch.argmax(logits, dim=-1).item()
                     attentions = outputs.attentions
 
                 # 5. Compute XAI Metrics
@@ -124,7 +123,7 @@ def _process_partition(
                     model=peft_model,
                     pixel_values=pixel_values,
                     attentions=attentions,
-                    target_class=pred_class
+                    target_class=pred_idx 
                 )
 
                 results.append({
@@ -134,7 +133,8 @@ def _process_partition(
                     "sparsity": metrics["sparsity"],
                     "deletion_score": metrics["deletion"],
                     "insertion_score": metrics["insertion"],
-                    "predicted_class": float(pred_class),
+                    "predicted_class": str(pred_idx),
+                    "true_label": str(true_label_str),
                     "device": device
                 })
 
@@ -146,30 +146,19 @@ def _process_partition(
 
 
 def run_silver(spark: SparkSession, df_bronze: DataFrame, cfg: ExperimentConfig) -> None:
-    """
-    Orchestrates the Silver Layer pipeline.
+    """Orchestrates the Silver Layer pipeline."""
     
-    Strategy:
-    1. Define Adapter Zoo (list of ranks).
-    2. CrossJoin Bronze Data with Adapter Zoo (Cartesian Product).
-    3. Execute Distributed XAI Extraction.
-    """
-    # 1. Adapter Zoo (From Config)
     ranks = cfg.adapters.ranks
-    
-    df_ranks = spark.createDataFrame(
-        [(r,) for r in ranks], ["adapter_rank"]
-    )
+    df_ranks = spark.createDataFrame([(r,) for r in ranks], ["adapter_rank"])
 
     # 2. Expand Dataset: Each image processed by Each Adapter
-    # We select only image_path to keep shuffle light
     df_input = df_bronze.select("image_path").distinct()
     df_workload = df_input.crossJoin(df_ranks)
 
     # Broadcast backbone name to workers
     bc_backbone = spark.sparkContext.broadcast(cfg.model.backbone_name)
 
-    # 3. Define Wrapper Function (NO @pandas_udf DECORATOR)
+    # 3. Define Wrapper Function
     def execute_silver_iter(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         return _process_partition(iterator, bc_backbone.value)
 
