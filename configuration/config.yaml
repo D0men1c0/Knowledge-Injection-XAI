@@ -20,7 +20,7 @@ paths:
 
 model:
   backbone_name: "facebook/dinov2-base"
-  batch_size: 64
+  batch_size: 8
   patch_size: 14
 
 adapters:
