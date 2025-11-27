@@ -13,7 +13,7 @@ from typing import Iterator, List, Dict, Any, Tuple
 import pandas as pd
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StructType, StructField, StringType, FloatType
-
+from peft import PeftModel
 from src.configs import ExperimentConfig
 from src.xai.metrics import XAIEvaluator
 from src.ml.adapters import LoRAFactory
@@ -63,13 +63,15 @@ def _load_base_model_and_processor(model_name: str, num_labels: int) -> Tuple[An
 
 def _process_partition(
     iterator: Iterator[pd.DataFrame],
-    backbone_name: str
+    backbone_name: str,
+    models_path_str: str
 ) -> Iterator[pd.DataFrame]:
     """
     Scalar Iterator Logic.
     """
     import torch
     from PIL import Image
+    from pathlib import Path
 
     # --- HARDCODED CONFIG FOR DATASET ---
     NUM_CLASSES = 37 
@@ -90,8 +92,16 @@ def _process_partition(
 
             # 2. Dynamic Adapter Switching
             if adapter_rank != active_rank:
-                peft_model = LoRAFactory.inject_adapter(base_model, adapter_rank)
+                adapter_path = Path(models_path_str) / f"lora_r{adapter_rank}"
+                print.info(f"Loading Adapter Rank {adapter_rank} from {adapter_path}")
+                peft_model = PeftModel.from_pretrained(
+                    base_model, 
+                    str(adapter_path),
+                    is_trainable=False
+                )
+                peft_model.to(device)
                 peft_model.eval()
+                
                 active_rank = adapter_rank
 
             try:
@@ -158,9 +168,11 @@ def run_silver(spark: SparkSession, df_bronze: DataFrame, cfg: ExperimentConfig)
     # Broadcast backbone name to workers
     bc_backbone = spark.sparkContext.broadcast(cfg.model.backbone_name)
 
+    bc_models_path = spark.sparkContext.broadcast(str(cfg.paths.models))
+
     # 3. Define Wrapper Function
     def execute_silver_iter(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
-        return _process_partition(iterator, bc_backbone.value)
+        return _process_partition(iterator, bc_backbone.value, bc_models_path.value)
 
     # 4. Execution
     # Repartitioning ensures optimal parallelism for the heavy XAI workload

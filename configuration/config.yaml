@@ -16,6 +16,7 @@ paths:
   silver: "data/processed/silver_parquet"
   gold: "data/processed/gold_parquet"
   logs: "logging/experiments_log.csv"
+  models: "artifacts/adapters"
 
 model:
   backbone_name: "facebook/dinov2-base"
@@ -23,7 +24,7 @@ model:
   patch_size: 14
 
 adapters:
-  ranks: [4]
+  ranks: [4, 16, 32]
   alpha: 16
   dropout: 0.1
   target_modules: ["query", "value"]

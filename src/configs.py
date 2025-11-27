@@ -46,6 +46,7 @@ class PathsConfig:
     silver: str
     gold: str
     logs: str
+    models: Path
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,8 @@ def load_config(path: str = "configuration/config.yaml") -> ExperimentConfig:
             bronze=raw["paths"]["bronze"],
             silver=raw["paths"]["silver"],
             gold=raw["paths"]["gold"],
-            logs=raw["paths"]["logs"]
+            logs=raw["paths"]["logs"],
+            models=Path(raw["paths"]["models"])
         ),
         model=ModelConfig(**raw["model"]),
         adapters=AdapterConfig(**raw["adapters"]),
