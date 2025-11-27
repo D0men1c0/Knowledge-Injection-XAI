@@ -28,14 +28,18 @@ def train_adapter(rank: int, cfg, dataset, num_labels: int):
     print(f"   STARTING TRAINING: LoRA Rank {rank}")
     print(f"{'='*40}\n")
     
-    # 1. Load Base Model
+    # 1. Select Device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 2. Load Base Model
+    print("Loading Base Model...")
     model = AutoModelForImageClassification.from_pretrained(
         cfg.model.backbone_name,
         num_labels=num_labels,
         ignore_mismatched_sizes=True
     )
 
-    # 2. Inject LoRA Config
+    # 3. Inject LoRA Config
     peft_config = LoraConfig(
         inference_mode=False,
         r=rank,
@@ -45,9 +49,13 @@ def train_adapter(rank: int, cfg, dataset, num_labels: int):
         bias="none"
     )
     model = get_peft_model(model, peft_config)
+    
+    print(f"Moving model to {device}...")
+    model.to(device)
+
     model.print_trainable_parameters()
 
-    # 3. Output Directory
+    # 4. Output Directory
     output_dir = cfg.paths.models / f"lora_r{rank}"
     if output_dir.exists():
         try:
@@ -56,22 +64,23 @@ def train_adapter(rank: int, cfg, dataset, num_labels: int):
             pass
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. Training Arguments
+    # 5. Training Arguments
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=16, 
         gradient_accumulation_steps=2,
         learning_rate=5e-4,
         num_train_epochs=5,
-        fp16=True,
+        fp16=True if torch.cuda.is_available() else False,
+        no_cuda=False,
         save_strategy="no",
-        logging_steps=50,
+        logging_steps=10,
         report_to="none",
         dataloader_num_workers=0,
         remove_unused_columns=False 
     )
 
-    # 5. Trainer
+    # 6. Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -79,13 +88,13 @@ def train_adapter(rank: int, cfg, dataset, num_labels: int):
         data_collator=DefaultDataCollator(),
     )
 
-    # 6. Execute
+    # 7. Execute
     start = time.time()
     trainer.train()
     duration = (time.time() - start) / 60
     print(f"\n[DONE] Rank {rank} trained in {duration:.1f} minutes.")
     
-    # 7. Save
+    # 8. Save
     print(f"Saving adapter to: {output_dir}")
     model.save_pretrained(str(output_dir))
     peft_config.save_pretrained(str(output_dir))
@@ -117,7 +126,7 @@ def main():
         inputs["label"] = examples["label"]
         return inputs
 
-    # Transform entire dataset
+    # Apply transform
     processed_dataset = raw_dataset["train"].with_transform(transforms)
 
     # 3. Loop through the "Zoo"
