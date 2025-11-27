@@ -1,11 +1,11 @@
 spark:
   app_name: "KnowledgeInjection_Pipeline"
-  master: "local[2]"
+  master: "local[1]"
   driver_mem: "8g"
   executor_mem: "8g"
   off_heap_enabled: "true"
   off_heap_size: "4g"
-  network_timeout: "800s"
+  network_timeout: "1000s"
   heartbeat_interval: "200s"
   max_result_size: "6g"
   arrow_enabled: "true"
