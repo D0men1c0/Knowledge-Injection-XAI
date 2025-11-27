@@ -4,11 +4,13 @@ services:
   xai-lab:
     build: .
     container_name: xai_container
+
     volumes:
-      - .:/app
+      - /mnt/c/PythonProjects/Knowledge-Injection-XAI:/app
       - xai_cache:/root/.cache/huggingface
-    
-    # Able to use GPU resources
+
+    working_dir: /app
+
     deploy:
       resources:
         reservations:
@@ -16,12 +18,16 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    
-    # Increased shared memory (vital for PyTorch DataLoader)
+
     shm_size: '8gb'
-    
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+
     stdin_open: true
     tty: true
+    command: tail -f /dev/null
 
 volumes:
   xai_cache:
