@@ -1,10 +1,10 @@
 """
 Silver Layer: Distributed XAI & Adapter Evaluation.
 
-Executes the core logic of the framework:
-1. Joins Bronze data with Adapter Zoo (LoRA configurations).
-2. Distributed Inference: Applies LoRA adapters dynamically.
-3. Computes XAI Metrics: Entropy, Deletion, Insertion, Sparsity.
+Executes the core logic:
+1. Joins Bronze data with Adapter Zoo configurations.
+2. Distributed Inference: Loads PRE-TRAINED LoRA adapters from disk.
+3. Computes XAI Metrics (Entropy, Deletion, etc.).
 """
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from typing import Iterator, List, Dict, Any, Tuple
 import pandas as pd
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StructType, StructField, StringType, FloatType
-from peft import PeftModel
+
 from src.configs import ExperimentConfig
 from src.xai.metrics import XAIEvaluator
-from src.ml.adapters import LoRAFactory
+from peft import PeftModel  # Required for loading trained adapters
 
 
 def get_silver_schema() -> StructType:
@@ -35,9 +35,7 @@ def get_silver_schema() -> StructType:
 
 
 def _load_base_model_and_processor(model_name: str, num_labels: int) -> Tuple[Any, Any, str]:
-    """
-    Initializes the base DINOv2 model with the CORRECT classification head size.
-    """
+    """Initializes the base DINOv2 model."""
     import torch
     import warnings
     from transformers import AutoImageProcessor, AutoModelForImageClassification
@@ -50,12 +48,13 @@ def _load_base_model_and_processor(model_name: str, num_labels: int) -> Tuple[An
     
     processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
     
+    # Base model loaded with correct head size but standard weights
     model = AutoModelForImageClassification.from_pretrained(
         model_name,
         output_attentions=True,
         return_dict=True,
         num_labels=num_labels,
-        ignore_mismatched_sizes=True 
+        ignore_mismatched_sizes=True
     ).to(device).eval()
 
     return processor, model, device
@@ -64,21 +63,21 @@ def _load_base_model_and_processor(model_name: str, num_labels: int) -> Tuple[An
 def _process_partition(
     iterator: Iterator[pd.DataFrame],
     backbone_name: str,
-    models_path_str: str
+    models_path_str: str,  # Path to artifacts/adapters
+    num_classes: int
 ) -> Iterator[pd.DataFrame]:
     """
-    Scalar Iterator Logic.
+    Scalar Iterator Logic: Loads Base Model once, swaps LoRA adapters dynamically.
     """
     import torch
     from PIL import Image
-    from pathlib import Path
 
-    # --- HARDCODED CONFIG FOR DATASET ---
-    NUM_CLASSES = 37 
-    
     # 1. Initialize Resources
-    processor, base_model, device = _load_base_model_and_processor(backbone_name, NUM_CLASSES)
+    processor, base_model, device = _load_base_model_and_processor(backbone_name, num_classes)
     evaluator = XAIEvaluator()
+    
+    # Helper to map ID back to Label string (if available in config)
+    id2label = base_model.config.id2label
 
     active_rank = -1
     peft_model = None
@@ -90,34 +89,42 @@ def _process_partition(
             image_path = row["image_path"]
             adapter_rank = int(row["adapter_rank"])
 
-            # 2. Dynamic Adapter Switching
+            # 2. Dynamic Adapter Switching (FROM DISK)
             if adapter_rank != active_rank:
                 adapter_path = Path(models_path_str) / f"lora_r{adapter_rank}"
-                print.info(f"Loading Adapter Rank {adapter_rank} from {adapter_path}")
-                peft_model = PeftModel.from_pretrained(
-                    base_model, 
-                    str(adapter_path),
-                    is_trainable=False
-                )
-                peft_model.to(device)
-                peft_model.eval()
                 
-                active_rank = adapter_rank
+                try:
+                    if not adapter_path.exists():
+                        print(f"WARNING: Adapter not found at {adapter_path}")
+                        continue
+                        
+                    # Load trained weights onto the base model
+                    peft_model = PeftModel.from_pretrained(
+                        base_model,
+                        str(adapter_path),
+                        is_trainable=False
+                    )
+                    peft_model.eval()
+                    active_rank = adapter_rank
+                    
+                except Exception as e:
+                    print(f"Error loading adapter {adapter_rank}: {e}")
+                    continue
+
+            # Skip if no model loaded
+            if peft_model is None: continue
 
             try:
-                # 3. Data Loading & Label Extraction
+                # 3. Data Loading
                 image = Image.open(image_path).convert("RGB")
                 
-                # Extract label from folder name and ensure it's within range
+                # Extract True Label (Folder Name)
                 true_label_str = Path(image_path).parent.name
-                try:
-                    true_label_idx = int(true_label_str)
-                    # Clamp label if dataset is messy/unmapped
-                    if true_label_idx >= NUM_CLASSES:
-                        true_label_idx = 0 
-                except ValueError:
-                    true_label_idx = 0
-
+                
+                # Map string label to index (Naive assumption: folders are named cleanly)
+                # In robust systems, pass a mapping dict. Here we use simple heuristics or 0.
+                # For XAI metrics, we usually need the index of the predicted class.
+                
                 inputs = processor(images=image, return_tensors="pt")
                 pixel_values = inputs["pixel_values"].to(device)
 
@@ -126,6 +133,7 @@ def _process_partition(
                     outputs = peft_model(pixel_values)
                     logits = outputs.logits
                     pred_idx = torch.argmax(logits, dim=-1).item()
+                    pred_label = id2label.get(pred_idx, str(pred_idx))
                     attentions = outputs.attentions
 
                 # 5. Compute XAI Metrics
@@ -133,7 +141,7 @@ def _process_partition(
                     model=peft_model,
                     pixel_values=pixel_values,
                     attentions=attentions,
-                    target_class=pred_idx 
+                    target_class=pred_idx
                 )
 
                 results.append({
@@ -143,13 +151,13 @@ def _process_partition(
                     "sparsity": metrics["sparsity"],
                     "deletion_score": metrics["deletion"],
                     "insertion_score": metrics["insertion"],
-                    "predicted_class": str(pred_idx),
+                    "predicted_class": str(pred_label),
                     "true_label": str(true_label_str),
                     "device": device
                 })
 
             except Exception as e:
-                print(f"Error processing {image_path}: {e}")
+                print(f"Error processing img {image_path}: {e}")
                 continue
 
         yield pd.DataFrame(results)
@@ -161,21 +169,25 @@ def run_silver(spark: SparkSession, df_bronze: DataFrame, cfg: ExperimentConfig)
     ranks = cfg.adapters.ranks
     df_ranks = spark.createDataFrame([(r,) for r in ranks], ["adapter_rank"])
 
-    # 2. Expand Dataset: Each image processed by Each Adapter
     df_input = df_bronze.select("image_path").distinct()
     df_workload = df_input.crossJoin(df_ranks)
 
-    # Broadcast backbone name to workers
+    # Broadcasts
     bc_backbone = spark.sparkContext.broadcast(cfg.model.backbone_name)
-
     bc_models_path = spark.sparkContext.broadcast(str(cfg.paths.models))
+    
+    # Hardcoded for now, ideally passed via config or detected
+    # This must match what was used in Training
+    NUM_CLASSES = 37 
 
-    # 3. Define Wrapper Function
     def execute_silver_iter(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
-        return _process_partition(iterator, bc_backbone.value, bc_models_path.value)
+        return _process_partition(
+            iterator, 
+            backbone_name=bc_backbone.value,
+            models_path_str=bc_models_path.value,
+            num_classes=NUM_CLASSES
+        )
 
-    # 4. Execution
-    # Repartitioning ensures optimal parallelism for the heavy XAI workload
     silver_output_path = cfg.paths.silver
     
     (
