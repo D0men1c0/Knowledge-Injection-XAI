@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  xai-lab:
+    build: .
+    container_name: xai_container
+    volumes:
+      - .:/app
+      - xai_cache:/root/.cache/huggingface
+    
+    # Able to use GPU resources
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # Increased shared memory (vital for PyTorch DataLoader)
+    shm_size: '8gb'
+    
+    stdin_open: true
+    tty: true
+
+volumes:
+  xai_cache:
