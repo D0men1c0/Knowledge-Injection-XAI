@@ -4,21 +4,18 @@ version = "0.1.0"
 description = "Knowledge Injection for Explainable AI - reference implementation"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.3.0",           # Core framework
-    "transformers>=4.44.0",   # Model loading (DINOv2)
-    "accelerate>=0.30.0",     # Optimization for PyTorch/HuggingFace on GPU
+    "torch>=2.3.0",
+    "transformers>=4.44.0",
+    "accelerate>=0.30.0",
     "datasets>=3.0.0",
     "scikit-learn>=1.5.0",
     "numpy>=1.26.0",
-    "pyspark>=3.5.0",         # Distributed computing
+    "pyspark>=3.5.0",
     "pandas>=2.2.0",
-    "pyarrow>=16.0.0",        # Serialization for Spark <-> Pandas
-    "pydantic>=2.8.0",
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-    "psutil>=6.0.0",          # NECESSARIO: Per ResourceMonitor (CPU/RAM tracking)
-    "pyyaml>=6.0.0",          # NECESSARIO: Per caricare config.yaml
-    "pillow>=10.0.0",         # Image processing
+    "pyarrow>=16.0.0",
+    "psutil>=6.0.0",
+    "pyyaml>=6.0.0",
+    "pillow>=10.0.0"
 ]
 
 [build-system]
