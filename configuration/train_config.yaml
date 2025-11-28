@@ -7,7 +7,7 @@ experiment:
 data:
   input_path: "data/raw/source"
   test_size: 0.2
-  num_workers: 0  # Set to 0 for Windows/WSL compatibility, increase on Linux
+  num_workers: 2  # Set to 0 for Windows/WSL compatibility, increase on Linux
 
 model:
   backbone: "facebook/dinov2-base"
@@ -28,7 +28,7 @@ adapters:
   # Advanced techniques for adapter training
   use_dora: true        # Dual Orthogonal RLoRA
   use_rslora: true      # Rank-Stabilized LoRA
-  target_modules: ["query", "value", "key", "dense", "fc1", "fc2"]
+  target_modules: ["query", "value", "fc1", "fc2"]
 
 augmentation:
   # Robustness augmentations

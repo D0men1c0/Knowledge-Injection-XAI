@@ -63,50 +63,47 @@ class LogCallback(TrainerCallback):
                 logger.info(f"Step {state.global_step}: Loss = {loss:.4f}")
 
 
-def get_transforms(cfg: TrainConfig, processor: BaseImageProcessor):
-    """Creates training and validation transforms with robust augmentation."""
-    image_mean = processor.image_mean
-    image_std = processor.image_std
-    size = cfg.augmentation.crop_size
+class ImageTransform:
+    """
+    This class handles the creation and application of torchvision transforms.
+    """
+    def __init__(self, cfg: TrainConfig, processor: BaseImageProcessor, is_training: bool = True):
+        image_mean = processor.image_mean
+        image_std = processor.image_std
+        size = cfg.augmentation.crop_size
 
-    train_transforms_list = [
-        transforms.Resize(cfg.augmentation.resize_size),
-        transforms.RandomRotation(cfg.augmentation.rotation_degrees),
-        transforms.RandomResizedCrop(size),
-        transforms.RandomHorizontalFlip(p=cfg.augmentation.horizontal_flip_prob),
-        transforms.ColorJitter(
-            brightness=cfg.augmentation.color_jitter_brightness,
-            contrast=cfg.augmentation.color_jitter_contrast
-        ),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=image_mean, std=image_std)
-    ]
+        if is_training:
+            # Training Augmentations
+            transforms_list = [
+                transforms.Resize(cfg.augmentation.resize_size),
+                transforms.RandomRotation(cfg.augmentation.rotation_degrees),
+                transforms.RandomResizedCrop(size),
+                transforms.RandomHorizontalFlip(p=cfg.augmentation.horizontal_flip_prob),
+                transforms.ColorJitter(
+                    brightness=cfg.augmentation.color_jitter_brightness,
+                    contrast=cfg.augmentation.color_jitter_contrast
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=image_mean, std=image_std)
+            ]
+        else:
+            # Deterministic Test Transforms
+            transforms_list = [
+                transforms.Resize(cfg.augmentation.resize_size),
+                transforms.CenterCrop(size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=image_mean, std=image_std)
+            ]
+        
+        self.transform = transforms.Compose(transforms_list)
 
-    test_transforms_list = [
-        transforms.Resize(cfg.augmentation.resize_size),
-        transforms.CenterCrop(size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=image_mean, std=image_std)
-    ]
-
-    _train_compose = transforms.Compose(train_transforms_list)
-    _test_compose = transforms.Compose(test_transforms_list)
-
-    def train_transform(examples: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, examples: Dict[str, Any]) -> Dict[str, Any]:
+        """Applies transforms to a batch of images."""
         examples["pixel_values"] = [
-            _train_compose(img.convert("RGB")) for img in examples["image"]
+            self.transform(img.convert("RGB")) for img in examples["image"]
         ]
         del examples["image"]
         return examples
-
-    def test_transform(examples: Dict[str, Any]) -> Dict[str, Any]:
-        examples["pixel_values"] = [
-            _test_compose(img.convert("RGB")) for img in examples["image"]
-        ]
-        del examples["image"]
-        return examples
-
-    return train_transform, test_transform
 
 
 def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]) -> Dict[str, float]:
@@ -389,7 +386,8 @@ def main() -> None:
 
     # Transforms
     processor = AutoImageProcessor.from_pretrained(cfg.model.backbone, use_fast=True)
-    train_tf, test_tf = get_transforms(cfg, processor)
+    train_tf = ImageTransform(cfg, processor, is_training=True)
+    test_tf = ImageTransform(cfg, processor, is_training=False)
     
     dataset_splits["train"] = dataset_splits["train"].with_transform(train_tf)
     dataset_splits["test"] = dataset_splits["test"].with_transform(test_tf)
