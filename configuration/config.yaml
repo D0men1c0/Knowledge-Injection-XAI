@@ -14,6 +14,7 @@ paths:
   input: "data/raw/source"
   bronze: "data/processed/bronze_parquet"
   silver: "data/processed/silver_parquet_v2"
+  ood: "data/processed/ood_parquet"
   gold: "data/processed/gold_parquet"
   logs: "logging/experiments_log.csv"
   models: "artifacts/adapters_enhanced"

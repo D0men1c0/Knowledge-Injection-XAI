@@ -44,6 +44,7 @@ class PathsConfig:
     input: Path
     bronze: str
     silver: str
+    ood: str
     gold: str
     logs: str
     models: Path
@@ -102,6 +103,7 @@ def load_config(path: str = "configuration/config.yaml") -> ExperimentConfig:
             input=Path(raw["paths"]["input"]),
             bronze=raw["paths"]["bronze"],
             silver=raw["paths"]["silver"],
+            ood=raw["paths"]["ood"],
             gold=raw["paths"]["gold"],
             logs=raw["paths"]["logs"],
             models=Path(raw["paths"]["models"])
