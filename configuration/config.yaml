@@ -13,10 +13,10 @@ spark:
 paths:
   input: "data/raw/source"
   bronze: "data/processed/bronze_parquet"
-  silver: "data/processed/silver_parquet"
+  silver: "data/processed/silver_parquet_v2"
   gold: "data/processed/gold_parquet"
   logs: "logging/experiments_log.csv"
-  models: "artifacts/adapters"
+  models: "artifacts/adapters_enhanced"
 
 model:
   backbone_name: "facebook/dinov2-base"
@@ -30,4 +30,4 @@ adapters:
   target_modules: ["query", "value"]
 
 xai:
-  perturbation_steps: 5
+  perturbation_steps: 10
