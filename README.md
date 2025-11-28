@@ -49,7 +49,22 @@ docker compose down -v --remove-orphans
 
 ---
 
-## 3. Enter the Container
+## 3. Stop or Restart (Clean Temporary Files)
+If you need to stop the environment or free up space (e.g., clear Spark temporary files in /tmp inside the container), perform a clean restart:
+
+1. Stop and remove the container (cleans runtime trash)
+    ```bash
+    docker compose down
+    ```
+
+2. Start a fresh instance (fast start, no rebuild)
+    ```bash
+    docker compose up -d
+    ```
+
+---
+
+## 4. Enter the Container
 
 To run scripts, you must be inside the Linux shell:
 
