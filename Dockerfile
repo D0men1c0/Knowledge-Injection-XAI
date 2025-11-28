@@ -51,7 +51,8 @@ RUN pip3 install --no-cache-dir \
     psutil \
     pyyaml \
     pillow \
-    tqdm
+    tqdm \
+    xgboost
 
 # Working directory
 WORKDIR /app
