@@ -252,7 +252,7 @@ def run_silver(spark: SparkSession, df_bronze: DataFrame, cfg: ExperimentConfig)
 
     (
         df_workload
-        .repartition(4)
+        .repartition(2)
         .sortWithinPartitions("adapter_rank")
         .mapInPandas(execute_silver_iter, schema=get_silver_schema())
         .write
