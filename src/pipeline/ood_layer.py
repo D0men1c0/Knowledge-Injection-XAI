@@ -22,10 +22,15 @@ from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from PIL import Image, ImageFilter
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+from transformers import logging as hf_logging
 
 from src.configs import ExperimentConfig
 from src.utils.telemetry import logger
 from peft import PeftModel
+
+# Suppress HuggingFace warnings at module level
+hf_logging.set_verbosity_error()
 
 
 def get_ood_schema() -> StructType:
@@ -71,10 +76,6 @@ def _load_base_model_and_processor(
 ) -> Tuple[Any, Any, str]:
     """Load base DINOv2 model and image processor."""
     import warnings
-    from transformers import AutoImageProcessor, AutoModelForImageClassification
-    from transformers import logging as hf_logging
-
-    hf_logging.set_verbosity_error()
     warnings.simplefilter("ignore")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -246,7 +247,8 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
     )
 
     df_workload = df_images.crossJoin(df_corruptions).crossJoin(df_adapters)
-    logger.info(f"OOD workload size: {df_workload.count()}")
+    estimated_size = len(image_paths) * len(CORRUPTION_FNS) * len(cfg.adapters.ranks)
+    logger.info(f"OOD workload size (estimated): {estimated_size}")
 
     bc_backbone = spark.sparkContext.broadcast(cfg.model.backbone_name)
     bc_models_path = spark.sparkContext.broadcast(str(cfg.paths.models))
@@ -266,7 +268,6 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
         )
 
     ood_output_path = cfg.paths.ood
-    Path(ood_output_path).mkdir(parents=True, exist_ok=True)
 
     (
         df_workload
@@ -277,3 +278,5 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
         .mode("overwrite")
         .parquet(ood_output_path)
     )
+
+    logger.info(f"OOD Layer completed. Output: {ood_output_path}")
