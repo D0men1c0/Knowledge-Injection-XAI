@@ -20,14 +20,11 @@ paths:
 
 model:
   backbone_name: "facebook/dinov2-base"
-  batch_size: 8
+  batch_size: 32
   patch_size: 14
 
 adapters:
   ranks: [4, 16, 32]
-  alpha: 16
-  dropout: 0.1
-  target_modules: ["query", "value"]
 
 xai:
   perturbation_steps: 10

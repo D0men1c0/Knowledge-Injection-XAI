@@ -7,7 +7,7 @@ Ensures type safety and autocompletion for nested configurations.
 import yaml
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 @dataclass(frozen=True)
@@ -61,9 +61,9 @@ class ModelConfig:
 class AdapterConfig:
     """LoRA Adapter Zoo configuration."""
     ranks: List[int]
-    alpha: int
-    dropout: float
-    target_modules: List[str]
+    alpha: Optional[int] = None
+    dropout: Optional[float] = None
+    target_modules: Optional[List[str]] = None
 
 
 @dataclass(frozen=True)
