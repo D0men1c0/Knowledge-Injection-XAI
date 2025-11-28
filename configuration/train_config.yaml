@@ -1,0 +1,38 @@
+experiment:
+  name: "enhanced_lora_training"
+  seed: 42
+  output_dir: "artifacts/adapters_enhanced"
+  metrics_file: "logging/training_metrics.csv"
+
+data:
+  input_path: "data/raw/source"
+  test_size: 0.2
+  num_workers: 0  # Set to 0 for Windows/WSL compatibility, increase on Linux
+
+model:
+  backbone: "facebook/dinov2-base"
+  num_labels: 2  # Will be overwritten dynamically by dataset
+  
+training:
+  epochs: 15
+  batch_size: 16
+  learning_rate: 3.0e-4
+  grad_accumulation: 2
+  logging_steps: 50
+  save_steps: 50
+
+adapters:
+  ranks: [4, 16, 32]
+  alpha_scaling: 2.0  # alpha = rank * alpha_scaling
+  dropout: 0.1
+  target_modules: ["query", "value"]
+
+augmentation:
+  # Robustness augmentations
+  enable: true
+  rotation_degrees: 30
+  horizontal_flip_prob: 0.5
+  color_jitter_brightness: 0.2
+  color_jitter_contrast: 0.2
+  resize_size: 256
+  crop_size: 224
