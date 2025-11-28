@@ -94,23 +94,31 @@ def _load_base_model_and_processor(
 class OODDataset(Dataset):
     """Dataset wrapper for OOD corrupted images."""
 
-    def __init__(self, records: List[Dict], processor: Any):
-        self.records = records
+    def __init__(
+        self,
+        image_paths: List[str],
+        corruption_types: List[str],
+        true_labels: List[str],
+        processor: Any,
+    ):
+        # Store as separate lists to avoid dict overhead
+        self.image_paths = image_paths
+        self.corruption_types = corruption_types
+        self.true_labels = true_labels
         self.processor = processor
 
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self.image_paths)
 
     def __getitem__(self, idx: int) -> Dict[str, Any] | None:
-        rec = self.records[idx]
         try:
-            img = Image.open(rec["image_path"]).convert("RGB")
-            img_corrupted = CORRUPTION_FNS[rec["corruption_type"]](img)
+            img = Image.open(self.image_paths[idx]).convert("RGB")
+            img_corrupted = CORRUPTION_FNS[self.corruption_types[idx]](img)
             inputs = self.processor(images=img_corrupted, return_tensors="pt")
             return {
-                "image_path": rec["image_path"],
-                "corruption_type": rec["corruption_type"],
-                "true_label": rec["true_label"],
+                "image_path": self.image_paths[idx],
+                "corruption_type": self.corruption_types[idx],
+                "true_label": self.true_labels[idx],
                 "pixel_values": inputs["pixel_values"].squeeze(0),
             }
         except Exception:
@@ -181,22 +189,29 @@ def _process_ood_partition(
             if peft_model is None:
                 continue
 
-            dataset = OODDataset(group_df.to_dict("records"), processor)
+            image_paths = group_df["image_path"].tolist()
+            corruption_types = group_df["corruption_type"].tolist()
+            true_labels = group_df["true_label"].tolist()
+
+            dataset = OODDataset(image_paths, corruption_types, true_labels, processor)
             dataloader = DataLoader(
                 dataset,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 collate_fn=collate_fn,
                 pin_memory=(device == "cuda"),
+                persistent_workers=(num_workers > 0),
+                prefetch_factor=2 if num_workers > 0 else None,
             )
 
             for batch in tqdm(dataloader, desc=f"OOD r={adapter_rank}", leave=False):
                 if batch is None:
                     continue
 
-                pixel_values = batch["pixel_values"].to(device)
+                pixel_values = batch["pixel_values"].to(device, non_blocking=True)
 
-                with torch.no_grad():
+                # inference mode is more efficient than no_grad
+                with torch.inference_mode():
                     outputs = peft_model(pixel_values)
                     preds = torch.argmax(outputs.logits, dim=-1)
 
