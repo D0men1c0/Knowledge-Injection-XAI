@@ -219,7 +219,9 @@ def _process_ood_partition(
                     pred_idx = preds[i].item()
                     pred_label = id2label.get(pred_idx, str(pred_idx))
                     true_label = batch["true_labels"][i]
-                    pred_clean = pred_label.replace("LABEL_", "")
+                    
+                    # Compare prediction index with folder name (which IS the class index)
+                    is_correct = 1 if str(pred_idx) == true_label else 0
 
                     results.append({
                         "image_path": str(img_path),
@@ -227,7 +229,7 @@ def _process_ood_partition(
                         "adapter_rank": str(adapter_rank),
                         "predicted_class": str(pred_label),
                         "true_label": str(true_label),
-                        "is_correct": 1 if pred_clean == true_label else 0,
+                        "is_correct": is_correct,
                         "device": device,
                     })
 
