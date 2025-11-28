@@ -18,14 +18,17 @@ training:
   batch_size: 16
   learning_rate: 3.0e-4
   grad_accumulation: 2
-  logging_steps: 50
-  save_steps: 50
+  logging_steps: 300
+  save_steps: 600
 
 adapters:
   ranks: [4, 16, 32]
   alpha_scaling: 2.0  # alpha = rank * alpha_scaling
   dropout: 0.1
-  target_modules: ["query", "value"]
+  # Advanced techniques for adapter training
+  use_dora: true        # Dual Orthogonal RLoRA
+  use_rslora: true      # Rank-Stabilized LoRA
+  target_modules: ["query", "value", "key", "dense", "fc1", "fc2"]
 
 augmentation:
   # Robustness augmentations

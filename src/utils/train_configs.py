@@ -28,6 +28,8 @@ class AdapterTrainConfig:
     ranks: List[int]
     alpha_scaling: float
     dropout: float
+    use_dora: bool
+    use_rslora: bool
     target_modules: List[str]
 
 

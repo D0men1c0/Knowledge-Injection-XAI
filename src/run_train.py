@@ -183,6 +183,8 @@ library_name: peft
 tags:
 - base_model:adapter:{cfg.model.backbone}
 - lora
+- computer-vision
+- image-classification
 - transformers
 ---
 
@@ -197,6 +199,8 @@ Fine-tuned LoRA adapter for `{cfg.model.backbone}`.
 - **Training Date:** {timestamp}
 - **Dataset Path:** `{cfg.data.input_path}`
 - **Hardware:** {device_name}
+- **Use DoRA:** {cfg.adapters.use_dora}
+- **Use RsLoRA:** {cfg.adapters.use_rslora}
 
 ## Training
 
@@ -204,6 +208,9 @@ Fine-tuned LoRA adapter for `{cfg.model.backbone}`.
 - **LoRA Rank:** {rank}
 - **LoRA Alpha:** {rank * cfg.adapters.alpha_scaling}
 - **LoRA Dropout:** {cfg.adapters.dropout}
+- **Use DoRA:** {cfg.adapters.use_dora}
+- **Use RsLoRA:** {cfg.adapters.use_rslora}
+- **Target Modules:** {cfg.adapters.target_modules}
 - **Batch Size:** {cfg.training.batch_size}
 - **Learning Rate:** {cfg.training.learning_rate}
 - **Epochs:** {cfg.training.epochs}
@@ -268,7 +275,9 @@ class AdapterTrainer:
             lora_dropout=self.cfg.adapters.dropout,
             target_modules=self.cfg.adapters.target_modules,
             bias="lora_only",
-            modules_to_save=["classifier"]
+            modules_to_save=["classifier"],
+            use_dora=self.cfg.adapters.use_dora,
+            use_rslora=self.cfg.adapters.use_rslora
         )
 
         model = get_peft_model(model, peft_config)
