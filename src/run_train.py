@@ -357,8 +357,6 @@ def main() -> None:
     # Load Data
     try:
         raw_dataset = load_dataset("imagefolder", data_dir=str(cfg.data.input_path))
-        # select only 100 examples for quick testing
-        raw_dataset["train"] = raw_dataset["train"].select(range(100))
     except Exception as e:
         logger.error(f"Error loading dataset: {e}")
         return
