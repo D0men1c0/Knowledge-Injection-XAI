@@ -1,304 +1,147 @@
 """
-Gold Layer: Meta-Learning & Insight Generation.
+Gold Layer: XAI-Robustness Correlation Analysis.
 
-Responsibilities:
-1. Distributed aggregation of XAI metrics per adapter.
-2. Centralized meta-learning for error prediction.
-3. Distributed generation of final meta-dataset via Pandas UDF.
+Validates hypothesis: XAI metrics on clean data predict OOD robustness.
 """
 
 from __future__ import annotations
 
-from typing import Iterator
 from pathlib import Path
+from typing import Tuple
+
 import pandas as pd
-import numpy as np
 import joblib
 
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, pandas_udf
-from pyspark.sql.types import (
-    StructType, StructField,
-    StringType, IntegerType, FloatType
-)
 from pyspark.sql import functions as F
 
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, StackingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
-import xgboost as xgb
-
-import matplotlib.pyplot as plt
-import seaborn as sns
+from sklearn.metrics import accuracy_score, roc_auc_score
+from scipy.stats import pearsonr, spearmanr
 
 from src.configs import ExperimentConfig
 from src.utils.telemetry import logger
 
 
-# ---------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------
-def get_meta_schema() -> StructType:
-    return StructType([
-        StructField("image_path", StringType(), False),
-        StructField("entropy", FloatType(), False),
-        StructField("sparsity", FloatType(), False),
-        StructField("deletion_score", FloatType(), False),
-        StructField("insertion_score", FloatType(), False),
-        StructField("is_correct", IntegerType(), False),
-        StructField("meta_probability", FloatType(), False),
-        StructField("meta_prediction", IntegerType(), False),
-    ])
+FEATURE_COLS = ["entropy", "sparsity", "deletion_score", "insertion_score"]
 
 
-# ---------------------------------------------------------------------
-# IO
-# ---------------------------------------------------------------------
-def load_silver_data(spark: SparkSession, cfg: ExperimentConfig) -> DataFrame:
-    logger.info(f"Loading Silver data from: {cfg.paths.silver}")
-
-    df = (
+def load_and_join_data(spark: SparkSession, cfg: ExperimentConfig) -> DataFrame:
+    """Join Silver (XAI) with OOD (is_correct) using broadcast join."""
+    df_silver = (
         spark.read.parquet(cfg.paths.silver)
-        .withColumn("pred_clean", F.regexp_replace(col("predicted_class"), "LABEL_", ""))
-        .withColumn("is_correct", F.when(col("pred_clean") == col("true_label"), 1).otherwise(0))
-        .withColumn("deletion_score", col("deletion_score").cast(FloatType()))
-        .withColumn("entropy", col("entropy").cast(FloatType()))
-        .withColumn("sparsity", col("sparsity").cast(FloatType()))
-        .select(
-            "image_path",
-            "adapter_rank",
-            "entropy",
-            "sparsity",
-            "deletion_score",
-            "insertion_score",
-            "is_correct",
-        )
-        .repartition(8)
-        .persist()
+        .select("image_path", "adapter_rank", *FEATURE_COLS)
+    )
+    df_ood = (
+        spark.read.parquet(cfg.paths.ood)
+        .select("image_path", "adapter_rank", "corruption_type", "is_correct")
     )
 
-    logger.info(f"Silver rows loaded: {df.count()}")
-    return df
+    df_joined = df_silver.join(
+        df_ood,
+        on=["image_path", "adapter_rank"],
+        how="inner",
+    ).cache()
+
+    logger.info(f"Joined dataset: {df_joined.count()} rows")
+    return df_joined
 
 
-# ---------------------------------------------------------------------
-# Aggregation (Spark)
-# ---------------------------------------------------------------------
-def aggregate_metrics_by_adapter(df: DataFrame, cfg: ExperimentConfig) -> None:
-    logger.info("Running adapter-level aggregation")
+def compute_correlations(pdf: pd.DataFrame) -> pd.DataFrame:
+    """Compute Pearson/Spearman correlations: XAI features vs is_correct."""
+    y = pdf["is_correct"].values
+    results = []
 
-    agg_df = (
-        df.groupBy("adapter_rank")
-          .agg(
-              F.mean("is_correct").alias("accuracy"),
-              F.mean("deletion_score").alias("avg_deletion_score"),
-              F.mean("entropy").alias("avg_entropy"),
-              F.mean("sparsity").alias("avg_sparsity"),
-              F.count("image_path").alias("sample_count"),
-          )
-          .orderBy("adapter_rank")
-    )
+    for col in FEATURE_COLS:
+        x = pdf[col].values
+        pr, pp = pearsonr(x, y)
+        sr, sp = spearmanr(x, y)
+        results.append({
+            "feature": col,
+            "pearson_r": pr, "pearson_p": pp,
+            "spearman_r": sr, "spearman_p": sp,
+        })
+        logger.info(f"{col}: Pearson={pr:.4f}, Spearman={sr:.4f}")
 
-    output_path = Path(cfg.paths.gold) / "adapter_ranking.parquet"
-    agg_df.write.mode("overwrite").parquet(str(output_path))
-
-    logger.info(f"Adapter aggregation saved to {output_path}")
+    return pd.DataFrame(results)
 
 
-# ---------------------------------------------------------------------
-# Meta-Learner (Driver Only)
-# ---------------------------------------------------------------------
-def train_meta_learner(df: DataFrame, plots_dir: Path, cfg: ExperimentConfig):
-    logger.info("Collecting meta dataset to driver for training")
-
-    pdf = df.select(
-        "entropy",
-        "sparsity",
-        "deletion_score",
-        "insertion_score",
-        "is_correct",
-    ).toPandas().dropna()
-
-    if pdf.empty:
-        logger.warning("No valid rows for meta-learning")
-        return None
-
-    X = pdf[["entropy", "sparsity", "deletion_score", "insertion_score"]]
-    y = pdf["is_correct"]
+def train_robustness_classifier(
+    pdf: pd.DataFrame, output_path: Path
+) -> Tuple[str, pd.DataFrame]:
+    """Train RandomForest: XAI features → is_correct."""
+    X = pdf[FEATURE_COLS].values
+    y = pdf["is_correct"].values
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    rf_model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=12,
-        random_state=42,
-        n_jobs=2,
+    clf = RandomForestClassifier(
+        n_estimators=100, max_depth=10, random_state=42,
+        n_jobs=-1, class_weight="balanced"
     )
+    clf.fit(X_train, y_train)
 
-    xgb_model = xgb.XGBClassifier(
-        n_estimators=300,
-        max_depth=6,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        eval_metric="logloss",
-        tree_method="hist",
-        random_state=42,
-    )
+    y_pred = clf.predict(X_test)
+    y_proba = clf.predict_proba(X_test)[:, 1]
 
-    stacking_clf = StackingClassifier(
-        estimators=[("rf", rf_model), ("xgb", xgb_model)],
-        final_estimator=LogisticRegression(max_iter=2000),
-        cv=5,
-        n_jobs=-1,
-    )
-
-    logger.info("Training stacking meta-learner")
-    stacking_clf.fit(X_train, y_train)
-
-    # Evaluation
-    y_pred = stacking_clf.predict(X_test)
-    y_proba = stacking_clf.predict_proba(X_test)[:, 1]
-
+    acc = accuracy_score(y_test, y_pred)
     auc = roc_auc_score(y_test, y_proba)
-    report = classification_report(y_test, y_pred)
+    logger.info(f"Classifier: Accuracy={acc:.4f}, ROC-AUC={auc:.4f}")
 
-    logger.info(f"Meta-Learner Report:\n{report}")
-    logger.info(f"Meta-Learner ROC-AUC: {auc:.4f}")
+    importance_df = pd.DataFrame({
+        "feature": FEATURE_COLS,
+        "importance": clf.feature_importances_,
+    }).sort_values("importance", ascending=False)
+    logger.info(f"Feature Importance:\n{importance_df.to_string(index=False)}")
 
-    # Save model
-    model_path = Path(cfg.paths.gold) / "meta_learner.joblib"
-    joblib.dump(stacking_clf, model_path)
-    logger.info(f"Meta-learner saved to {model_path}")
+    model_path = output_path / "robustness_classifier.joblib"
+    joblib.dump(clf, model_path)
 
-    plot_feature_importance(rf_model, X.columns, plots_dir / "rf_feature_importance.png")
-    plot_confusion_matrix(y_test, y_pred, plots_dir / "meta_confusion_matrix.png")
-
-    return model_path
-
-_model = None
-def load_model_once(model_path: Path):
-    global _model
-    if _model is None:
-        _model = joblib.load(model_path)
-    return _model
-
-# ---------------------------------------------------------------------
-# Distributed Meta Inference (UDF)
-# ---------------------------------------------------------------------
-def run_meta_inference(df: DataFrame, model_path: Path, cfg: ExperimentConfig):
-
-    bc_model_path = df.sql_ctx.sparkSession.sparkContext.broadcast(str(model_path))
-
-    @pandas_udf(get_meta_schema())
-    def meta_udf(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
-        model = load_model_once(bc_model_path.value)
-
-        for batch in iterator:
-            X = batch[[
-                "entropy",
-                "sparsity",
-                "deletion_score",
-                "insertion_score",
-            ]]
-
-            proba = model.predict_proba(X)[:, 1]
-            pred = model.predict(X)
-
-            batch["meta_probability"] = proba.astype("float32")
-            batch["meta_prediction"] = pred.astype("int32")
-
-            yield batch
+    return str(model_path), importance_df
 
 
-    meta_df = (
-        df.repartition(8)
-          .select(
-              "image_path",
-              "entropy",
-              "sparsity",
-              "deletion_score",
-              "insertion_score",
-              "is_correct",
-          )
-          .select(meta_udf(F.struct("*")).alias("data"))
-          .select("data.*")
+def compute_aggregated_stats(df: DataFrame) -> DataFrame:
+    """Aggregated stats using Spark-native operations."""
+    return (
+        df.groupBy("adapter_rank", "corruption_type")
+        .agg(
+            F.mean("entropy").alias("mean_entropy"),
+            F.mean("sparsity").alias("mean_sparsity"),
+            F.mean("deletion_score").alias("mean_deletion"),
+            F.mean("insertion_score").alias("mean_insertion"),
+            F.mean("is_correct").alias("ood_accuracy"),
+            F.sum("is_correct").alias("correct_count"),
+            F.count("*").alias("total_count"),
+        )
     )
 
-    output_path = Path(cfg.paths.gold) / "meta_insights.parquet"
-    meta_df.write.mode("overwrite").parquet(str(output_path))
 
-    logger.info(f"Distributed meta-insight dataset saved to {output_path}")
-
-
-# ---------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------
-def plot_feature_importance(model, features, output_path: Path):
-    importances = model.feature_importances_
-    indices = np.argsort(importances)[::-1]
-
-    plt.figure(figsize=(10, 6))
-    sns.barplot(
-        x=importances[indices],
-        y=[features[i] for i in indices],
-    )
-    plt.title("XAI Metric Importance for Error Prediction")
-    plt.xlabel("Importance")
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-    logger.info(f"Feature importance plot saved to {output_path}")
-
-
-def plot_confusion_matrix(y_true, y_pred, output_path: Path):
-    cm = confusion_matrix(y_true, y_pred)
-
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        xticklabels=["Error (0)", "Correct (1)"],
-        yticklabels=["Error (0)", "Correct (1)"],
-    )
-    plt.ylabel("Ground Truth")
-    plt.xlabel("Meta-Learner Prediction")
-    plt.title("Meta-Learner Confusion Matrix")
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-    logger.info(f"Confusion matrix plot saved to {output_path}")
-
-
-# ---------------------------------------------------------------------
-# Entry Point
-# ---------------------------------------------------------------------
 def run_gold(spark: SparkSession, cfg: ExperimentConfig) -> None:
+    """Execute Gold Layer pipeline."""
     logger.info("Starting Gold Layer")
 
-    plots_dir = Path("artifacts/plots")
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    Path(cfg.paths.gold).mkdir(parents=True, exist_ok=True)
+    gold_path = Path(cfg.paths.gold)
+    gold_path.mkdir(parents=True, exist_ok=True)
 
-    # Load + Cache
-    df_silver = load_silver_data(spark, cfg)
+    df_joined = load_and_join_data(spark, cfg)
+    df_joined.write.mode("overwrite").parquet(str(gold_path / "joined_dataset.parquet"))
 
-    # Distributed Aggregation
-    aggregate_metrics_by_adapter(df_silver, cfg)
+    # Aggregated stats (Spark-native)
+    agg_df = compute_aggregated_stats(df_joined)
+    agg_df.write.mode("overwrite").parquet(str(gold_path / "aggregated_stats.parquet"))
+    agg_df.show(truncate=False)
 
-    # Train Meta Learner (Driver)
-    model_path = train_meta_learner(df_silver, plots_dir, cfg)
+    # Pandas for ML
+    pdf = df_joined.toPandas()
 
-    # Distributed Meta Inference (UDF)
-    if model_path is not None:
-        run_meta_inference(df_silver, model_path, cfg)
+    corr_df = compute_correlations(pdf)
+    corr_df.to_parquet(gold_path / "correlations.parquet", index=False)
 
-    df_silver.unpersist()
-    logger.info("Gold Layer completed successfully")
+    _, importance_df = train_robustness_classifier(pdf, gold_path)
+    importance_df.to_parquet(gold_path / "feature_importance.parquet", index=False)
+
+    df_joined.unpersist()
+    logger.info("Gold Layer completed")
