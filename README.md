@@ -16,6 +16,7 @@ This project investigates whether attention-based XAI metrics (Entropy, Deletion
 |---------|--------|
 | **XAI predicts robustness** | ROC-AUC ~0.74 using Meta-Learner |
 | **Entropy is most informative** | Higher entropy → less robust (r = -0.17) |
+| **Effect size** | Cohen's d = 0.55 (medium) confirms practical significance |
 | **Lower LoRA rank generalizes better** | Rank 4 (95%) vs Rank 32 (76%) on OOD data |
 | **Blur is most challenging** | Up to 81% accuracy drop at heavy level |
 
@@ -194,12 +195,15 @@ spark:
   executor_memory: "4g"
 
 model:
-  batch_size: 32        # Reduce if OOM
-  lora_ranks: [4, 16, 32]
+  backbone_name: "facebook/dinov2-base"
+  batch_size: 16
+  patch_size: 14
 
-corruptions:
-  types: ["gaussian_noise", "blur", "contrast"]
-  levels: ["shallow", "medium", "heavy"]
+adapters:
+  ranks: [4, 16, 32]
+
+xai:
+  perturbation_steps: 10
 ```
 
 ---
