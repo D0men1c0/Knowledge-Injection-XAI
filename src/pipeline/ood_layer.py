@@ -38,6 +38,7 @@ def get_ood_schema() -> StructType:
     return StructType([
         StructField("image_path", StringType(), False),
         StructField("corruption_type", StringType(), False),
+        StructField("corruption_level", StringType(), False),
         StructField("adapter_rank", StringType(), False),
         StructField("predicted_class", StringType(), False),
         StructField("true_label", StringType(), False),
@@ -63,6 +64,13 @@ def apply_contrast_change(img: Image.Image, factor: float = 0.5) -> Image.Image:
     adjusted = (arr - mean) * factor + mean
     return Image.fromarray(np.clip(adjusted, 0, 255).astype(np.uint8))
 
+
+# Corruption levels: shallow, medium, heavy
+CORRUPTION_LEVELS = {
+    "gaussian_noise": {"shallow": 15.0, "medium": 40.0, "heavy": 80.0},
+    "blur": {"shallow": 1.0, "medium": 3.0, "heavy": 6.0},
+    "contrast": {"shallow": 0.7, "medium": 0.4, "heavy": 0.15},
+}
 
 CORRUPTION_FNS = {
     "gaussian_noise": apply_gaussian_noise,
@@ -98,12 +106,13 @@ class OODDataset(Dataset):
         self,
         image_paths: List[str],
         corruption_types: List[str],
+        corruption_levels: List[str],
         true_labels: List[str],
         processor: Any,
     ):
-        # Store as separate lists to avoid dict overhead
         self.image_paths = image_paths
         self.corruption_types = corruption_types
+        self.corruption_levels = corruption_levels
         self.true_labels = true_labels
         self.processor = processor
 
@@ -113,11 +122,18 @@ class OODDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any] | None:
         try:
             img = Image.open(self.image_paths[idx]).convert("RGB")
-            img_corrupted = CORRUPTION_FNS[self.corruption_types[idx]](img)
+            corruption_type = self.corruption_types[idx]
+            corruption_level = self.corruption_levels[idx]
+            
+            # Get the parameter value for this corruption+level
+            param = CORRUPTION_LEVELS[corruption_type][corruption_level]
+            img_corrupted = CORRUPTION_FNS[corruption_type](img, param)
+            
             inputs = self.processor(images=img_corrupted, return_tensors="pt")
             return {
                 "image_path": self.image_paths[idx],
-                "corruption_type": self.corruption_types[idx],
+                "corruption_type": corruption_type,
+                "corruption_level": corruption_level,
                 "true_label": self.true_labels[idx],
                 "pixel_values": inputs["pixel_values"].squeeze(0),
             }
@@ -133,6 +149,7 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Any] | None:
     return {
         "image_paths": [b["image_path"] for b in batch],
         "corruption_types": [b["corruption_type"] for b in batch],
+        "corruption_levels": [b["corruption_level"] for b in batch],
         "true_labels": [b["true_label"] for b in batch],
         "pixel_values": torch.stack([b["pixel_values"] for b in batch]),
     }
@@ -192,9 +209,12 @@ def _process_ood_partition(
 
             image_paths = group_df["image_path"].tolist()
             corruption_types = group_df["corruption_type"].tolist()
+            corruption_levels = group_df["corruption_level"].tolist()
             true_labels = group_df["true_label"].tolist()
 
-            dataset = OODDataset(image_paths, corruption_types, true_labels, processor)
+            dataset = OODDataset(
+                image_paths, corruption_types, corruption_levels, true_labels, processor
+            )
             dataloader = DataLoader(
                 dataset,
                 batch_size=batch_size,
@@ -211,7 +231,6 @@ def _process_ood_partition(
 
                 pixel_values = batch["pixel_values"].to(device, non_blocking=True)
 
-                # inference mode is more efficient than no_grad
                 with torch.inference_mode():
                     outputs = peft_model(pixel_values)
                     preds = torch.argmax(outputs.logits, dim=-1)
@@ -221,13 +240,13 @@ def _process_ood_partition(
                     pred_label = id2label.get(pred_idx, str(pred_idx))
                     true_label = batch["true_labels"][i]
                     
-                    # Compare prediction index with true label index (alphabetical order)
                     true_idx = label2id.get(true_label, -1) if label2id else -1
                     is_correct = 1 if pred_idx == true_idx else 0
 
                     results.append({
                         "image_path": str(img_path),
                         "corruption_type": batch["corruption_types"][i],
+                        "corruption_level": batch["corruption_levels"][i],
                         "adapter_rank": str(adapter_rank),
                         "predicted_class": str(pred_label),
                         "true_label": str(true_label),
@@ -265,14 +284,15 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
         [(p, Path(p).parent.name) for p in image_paths], ["image_path", "true_label"]
     )
     df_corruptions = spark.createDataFrame(
-        [(c,) for c in CORRUPTION_FNS.keys()], ["corruption_type"]
+        [(c, lvl) for c in CORRUPTION_FNS.keys() for lvl in ["shallow", "medium", "heavy"]],
+        ["corruption_type", "corruption_level"]
     )
     df_adapters = spark.createDataFrame(
         [(str(r),) for r in cfg.adapters.ranks], ["adapter_rank"]
     )
 
     df_workload = df_images.crossJoin(df_corruptions).crossJoin(df_adapters)
-    estimated_size = len(image_paths) * len(CORRUPTION_FNS) * len(cfg.adapters.ranks)
+    estimated_size = len(image_paths) * len(CORRUPTION_FNS) * 3 * len(cfg.adapters.ranks)
     logger.info(f"OOD workload size (estimated): {estimated_size}")
 
     bc_backbone = spark.sparkContext.broadcast(cfg.model.backbone_name)
