@@ -368,14 +368,10 @@ def build_summary_tables(
 # =============================================================================
 def run_gold(spark: SparkSession, cfg: ExperimentConfig) -> None:
     """Execute Gold Layer: Spark-optimized analysis."""
-    logger.info("Starting Gold Layer (Spark-optimized)")
+    logger.info("Starting Gold Layer")
 
     gold = Path(cfg.paths.gold)
     gold.mkdir(parents=True, exist_ok=True)
-
-    # Arrow optimization
-    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
-    spark.conf.set("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
 
     # 1. Load + join
     logger.info("Loading data...")

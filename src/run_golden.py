@@ -29,6 +29,9 @@ def build_spark(cfg: ExperimentConfig) -> SparkSession:
     builder = SparkSession.builder.appName(cfg.spark.app_name + "_Gold").master(cfg.spark.master)
     for k, v in cfg.spark.to_dict().items():
         builder = builder.config(k, v)
+    # Arrow optimization
+    builder = builder.config("spark.sql.execution.arrow.pyspark.enabled", "true")
+    builder = builder.config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
     return spark
