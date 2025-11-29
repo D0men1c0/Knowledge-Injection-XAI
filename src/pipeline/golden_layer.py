@@ -19,7 +19,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.metrics import (
@@ -28,6 +28,7 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 from sklearn.inspection import permutation_importance
+from xgboost import XGBClassifier
 
 from src.configs import ExperimentConfig
 from src.utils.telemetry import logger
@@ -257,19 +258,62 @@ def train_meta_learner(pdf: pd.DataFrame, output_path: Path) -> Dict[str, Any]:
         X_sc, y, test_size=0.2, random_state=42, stratify=y
     )
 
+    # Class weight for imbalanced data
+    n_pos, n_neg = (y_tr == 1).sum(), (y_tr == 0).sum()
+    scale_pos_weight = n_neg / n_pos
+
     models = {
         "RandomForest": RandomForestClassifier(
-            n_estimators=100, max_depth=10, random_state=42, n_jobs=-1, class_weight="balanced"
+            n_estimators=200,
+            max_depth=12,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            random_state=42,
+            n_jobs=-1,
+            class_weight="balanced",
         ),
-        "GradientBoosting": GradientBoostingClassifier(
-            n_estimators=100, max_depth=5, random_state=42
+        "XGBoost": XGBClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,  # L1 regularization
+            reg_lambda=1.0,  # L2 regularization
+            scale_pos_weight=scale_pos_weight,
+            random_state=42,
+            n_jobs=-1,
+            eval_metric="auc",
+        ),
+        "XGBoost_Tuned": XGBClassifier(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.7,
+            colsample_bytree=0.7,
+            reg_alpha=0.5,
+            reg_lambda=2.0,
+            gamma=0.1,  # Min loss reduction for split
+            min_child_weight=3,
+            scale_pos_weight=scale_pos_weight,
+            random_state=42,
+            n_jobs=-1,
+            eval_metric="auc",
         ),
         "LogisticRegression": LogisticRegression(
-            random_state=42, class_weight="balanced", max_iter=1000
+            C=0.1,  # Regularization strength (lower = more regularization)
+            penalty="l2",
+            random_state=42,
+            class_weight="balanced",
+            max_iter=1000,
+            solver="lbfgs",
         ),
     }
 
     results = []
+    best_model, best_auc = None, 0
+
     for name, clf in models.items():
         clf.fit(X_tr, y_tr)
         y_pred = clf.predict(X_te)
@@ -281,10 +325,11 @@ def train_meta_learner(pdf: pd.DataFrame, output_path: Path) -> Dict[str, Any]:
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         cv_auc = cross_val_score(clf, X_sc, y, cv=cv, scoring='roc_auc')
 
+        auc = roc_auc_score(y_te, y_proba)
         results.append({
             "model": name,
             "accuracy": accuracy_score(y_te, y_pred),
-            "roc_auc": roc_auc_score(y_te, y_proba),
+            "roc_auc": auc,
             "f1": f1_score(y_te, y_pred),
             "precision": precision_score(y_te, y_pred),
             "recall": recall_score(y_te, y_pred),
@@ -296,21 +341,26 @@ def train_meta_learner(pdf: pd.DataFrame, output_path: Path) -> Dict[str, Any]:
             "tp": int(tp), "tn": int(tn), "fp": int(fp), "fn": int(fn),
         })
 
-    # Feature importance
+        if auc > best_auc:
+            best_auc, best_model = auc, clf
+
+    # Feature importance from best XGBoost
+    xgb = models["XGBoost_Tuned"]
     rf = models["RandomForest"]
-    perm = permutation_importance(rf, X_te, y_te, n_repeats=20, random_state=42, n_jobs=-1)
+    perm = permutation_importance(xgb, X_te, y_te, n_repeats=20, random_state=42, n_jobs=-1)
     lr = models["LogisticRegression"]
 
     imp = pd.DataFrame({
         "feature": FEATURE_COLS,
-        "gini_importance": rf.feature_importances_,
+        "xgb_importance": xgb.feature_importances_,
+        "rf_importance": rf.feature_importances_,
         "perm_importance": perm.importances_mean,
         "perm_std": perm.importances_std,
         "lr_coef": lr.coef_[0],
         "lr_odds_ratio": np.exp(lr.coef_[0]),
     }).sort_values("perm_importance", ascending=False)
 
-    joblib.dump({"model": rf, "scaler": scaler}, output_path / "meta_learner.joblib")
+    joblib.dump({"model": best_model, "scaler": scaler}, output_path / "meta_learner.joblib")
 
     return {"results": pd.DataFrame(results), "importance": imp}
 
@@ -341,7 +391,7 @@ def build_summary_tables(
     ])
 
     # XAI feature ranking
-    xai_rank = ml_results["importance"][["feature", "gini_importance", "perm_importance", "lr_odds_ratio"]].copy()
+    xai_rank = ml_results["importance"][["feature", "xgb_importance", "perm_importance", "lr_odds_ratio"]].copy()
     xai_rank["rank"] = range(1, len(xai_rank) + 1)
 
     # Adapter ranking
