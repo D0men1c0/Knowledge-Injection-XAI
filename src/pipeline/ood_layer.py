@@ -145,6 +145,7 @@ def _process_ood_partition(
     num_classes: int,
     batch_size: int,
     num_workers: int = 2,
+    label2id: Dict[str, int] = None,
 ) -> Iterator[pd.DataFrame]:
     """Process a Spark partition with optimized GroupBy logic."""
     try:
@@ -220,8 +221,9 @@ def _process_ood_partition(
                     pred_label = id2label.get(pred_idx, str(pred_idx))
                     true_label = batch["true_labels"][i]
                     
-                    # Compare prediction index with folder name (which IS the class index)
-                    is_correct = 1 if str(pred_idx) == true_label else 0
+                    # Compare prediction index with true label index (alphabetical order)
+                    true_idx = label2id.get(true_label, -1) if label2id else -1
+                    is_correct = 1 if pred_idx == true_idx else 0
 
                     results.append({
                         "image_path": str(img_path),
@@ -248,6 +250,12 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
     logger.info("Starting OOD Layer")
 
     input_path = Path(cfg.paths.input)
+    
+    # Build label mapping (alphabetical order, same as load_dataset)
+    folder_names = sorted([f.name for f in input_path.iterdir() if f.is_dir()])
+    label2id = {name: i for i, name in enumerate(folder_names)}
+    logger.info(f"Found {len(folder_names)} classes, label2id sample: {dict(list(label2id.items())[:5])}")
+    
     image_paths = [str(p) for p in input_path.rglob("*.jpg")]
     if not image_paths:
         image_paths = [str(p) for p in input_path.rglob("*.png")]
@@ -271,8 +279,9 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
     bc_models_path = spark.sparkContext.broadcast(str(cfg.paths.models))
     bc_batch_size = spark.sparkContext.broadcast(cfg.model.batch_size)
     bc_num_workers = spark.sparkContext.broadcast(2)
+    bc_label2id = spark.sparkContext.broadcast(label2id)
 
-    NUM_CLASSES = 37
+    NUM_CLASSES = len(folder_names)
 
     def execute_ood_iter(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         return _process_ood_partition(
@@ -282,6 +291,7 @@ def run_ood(spark: SparkSession, cfg: ExperimentConfig) -> None:
             num_classes=NUM_CLASSES,
             batch_size=bc_batch_size.value,
             num_workers=bc_num_workers.value,
+            label2id=bc_label2id.value,
         )
 
     ood_output_path = cfg.paths.ood
