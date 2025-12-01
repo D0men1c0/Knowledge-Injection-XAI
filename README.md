@@ -168,12 +168,6 @@ xai:
 
 ---
 
-## License
-
-Apache License 2.0 - see [LICENSE](LICENSE)
-
----
-
 ## Appendix: Detailed Tables
 
 ### Pipeline Layers
@@ -223,3 +217,9 @@ Apache License 2.0 - see [LICENSE](LICENSE)
 | XGBoost (tuned) | 0.739 | 0.737 ± 0.006 |
 | RandomForest | 0.731 | 0.729 ± 0.005 |
 | LogisticRegression | 0.718 | 0.717 ± 0.005 |
+
+---
+
+## License
+
+Apache License 2.0 - see [LICENSE](LICENSE)
