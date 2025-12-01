@@ -28,7 +28,7 @@ The pipeline is implemented in PyTorch and orchestrated with Apache Spark.
 
 ## Pipeline Architecture
 
-![Pipeline overview](docs/figures/pipeline_overview.png)
+![Pipeline overview](docs/img/pipeline_overview.png)
 
 The pipeline follows a Medallion architecture with 5 layers:
 
@@ -81,13 +81,13 @@ flowchart LR
 
 ### Accuracy Drop by Adapter
 
-![Accuracy comparison](docs/figures/accuracy_comparison.png)
+![Accuracy comparison](docs/img/accuracy_comparison.png)
 
 *Lower-rank adapters (r=4) retain accuracy under corruption; higher-rank (r=32) overfit and degrade significantly.*
 
 ### Feature Importance
 
-![Feature importance](docs/figures/feature_importance.png)
+![Feature importance](docs/img/feature_importance.png)
 
 *Entropy is the most predictive XAI metric for OOD robustness, followed by insertion score.*
 
@@ -97,13 +97,13 @@ flowchart LR
 
 ### Attention Heatmap
 
-![Attention heatmap](docs/figures/attention_heatmap.png)
+![Attention heatmap](docs/img/attention_heatmap.png)
 
 *Left: original image. Right: attention heatmap showing where the ViT focuses. Warmer colors = higher attention.*
 
 ### OOD Corruptions
 
-![Corruption examples](docs/figures/corruption_examples.png)
+![Corruption examples](docs/img/corruption_examples.png)
 
 *From left to right: clean image, Gaussian noise, blur, low contrast (medium severity).*
 
